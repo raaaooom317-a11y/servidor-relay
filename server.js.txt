@@ -1,0 +1,93 @@
+const { WebSocketServer } = require('ws');
+const PORT = process.env.PORT || 8080;
+const wss = new WebSocketServer({ port: PORT });
+
+// Almacena las salas y sus dispositivos
+const salas = {};
+
+console.log(`📡 Servidor Relay activo en puerto ${PORT}`);
+
+wss.on('connection', (ws) => {
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+
+      // REGISTRO DE DISPOSITIVO (Emisor o Receptor)
+      if (data.tipo === 'registro') {
+        ws.sala = data.sala;
+        ws.rol = data.rol;
+        ws.deviceId = data.deviceId;
+        ws.deviceName = data.deviceName || 'Dispositivo';
+
+        if (!salas[ws.sala]) {
+          salas[ws.sala] = { emisores: new Map(), receptores: [] };
+        }
+
+        if (ws.rol === 'emisor') {
+          salas[ws.sala].emisores.set(ws.deviceId, ws);
+          console.log(`🟢 Emisor registrado: ${ws.deviceName} (${ws.deviceId}) en sala: ${ws.sala}`);
+          notificarReceptores(ws.sala);
+        } else if (ws.rol === 'receptor') {
+          salas[ws.sala].receptores.push(ws);
+          console.log(`📱 Receptor conectado a sala: ${ws.sala}`);
+          enviarListaEmisores(ws);
+        }
+      }
+
+      // REENVIAR COMANDO DEL RECEPTOR AL EMISOR SELECCIONADO
+      if (data.tipo === 'comando') {
+        const salaObj = salas[data.sala];
+        if (salaObj) {
+          const emisorObjetivo = salaObj.emisores.get(data.targetDeviceId);
+          if (emisorObjetivo && emisorObjetivo.readyState === 1) {
+            emisorObjetivo.send(JSON.stringify({
+              tipo: 'comando',
+              accion: data.accion
+            }));
+            console.log(`⚡ Comando "${data.accion}" enviado a ${data.targetDeviceId}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error procesando mensaje:', e);
+    }
+  });
+
+  ws.on('close', () => {
+    if (ws.sala && salas[ws.sala]) {
+      if (ws.rol === 'emisor') {
+        salas[ws.sala].emisores.delete(ws.deviceId);
+        console.log(`🔴 Emisor desconectado: ${ws.deviceName}`);
+        notificarReceptores(ws.sala);
+      } else if (ws.rol === 'receptor') {
+        salas[ws.sala].receptores = salas[ws.sala].receptores.filter(r => r !== ws);
+      }
+    }
+  });
+});
+
+function obtenerListaEmisores(sala) {
+  const lista = [];
+  if (salas[sala]) {
+    salas[sala].emisores.forEach((ws, id) => {
+      lista.push({ id: id, nombre: ws.deviceName });
+    });
+  }
+  return lista;
+}
+
+function notificarReceptores(sala) {
+  if (salas[sala]) {
+    const lista = obtenerListaEmisores(sala);
+    salas[sala].receptores.forEach(rec => {
+      if (rec.readyState === 1) {
+        rec.send(JSON.stringify({ tipo: 'lista_emisores', dispositivos: lista }));
+      }
+    });
+  }
+}
+
+function enviarListaEmisores(ws) {
+  const lista = obtenerListaEmisores(ws.sala);
+  ws.send(JSON.stringify({ tipo: 'lista_emisores', dispositivos: lista }));
+}
